@@ -1,0 +1,18 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+logs/
+*.log
+
+# Local data (don't commit personal data)
+memory.json
+entities.json
+council_prompts.json
+
+# OS
+.DS_Store
