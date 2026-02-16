@@ -16,6 +16,14 @@ import json
 from datetime import datetime
 from flask import Flask, request, jsonify
 
+# Import transcript processor for signal extraction
+try:
+    from transcript_processor import process_meeting
+    PROCESSOR_AVAILABLE = True
+except ImportError:
+    PROCESSOR_AVAILABLE = False
+    print("Warning: transcript_processor not available")
+
 app = Flask(__name__)
 
 WEBHOOK_SECRET = os.environ.get('FATHOM_WEBHOOK_SECRET', '')
@@ -86,6 +94,16 @@ def fathom_webhook():
     print(f"  Stored meeting: {meeting_record['title']}")
     print(f"  Total meetings stored: {len(meetings_store)}")
 
+    # Process transcript for signals (action items, decisions, etc.)
+    if PROCESSOR_AVAILABLE:
+        try:
+            processed = process_meeting(meeting_record)
+            signals = processed.get('signals', {})
+            action_count = len(signals.get('actions_for_me', [])) + len(signals.get('follow_ups', []))
+            print(f"  Extracted {action_count} action items, {len(signals.get('decisions', []))} decisions")
+        except Exception as e:
+            print(f"  Processor error: {e}")
+
     return jsonify({"status": "ok", "meeting_id": meeting_record['id']})
 
 
@@ -128,6 +146,24 @@ def health():
     })
 
 
+@app.route('/inbox', methods=['GET'])
+def inbox():
+    """Get your action items and deadlines from meetings."""
+    if not PROCESSOR_AVAILABLE:
+        return jsonify({"error": "Processor not available"}), 500
+
+    from transcript_processor import get_my_inbox, summarize_week
+
+    status = request.args.get('status', 'open')
+    inbox_items = get_my_inbox(status if status != 'all' else None)
+    summary = summarize_week()
+
+    return jsonify({
+        "inbox": inbox_items,
+        "summary": summary
+    })
+
+
 @app.route('/', methods=['GET'])
 def index():
     """Root endpoint."""
@@ -138,6 +174,7 @@ def index():
             "GET /meetings": "List recent meetings",
             "GET /meetings/latest": "Get most recent meeting",
             "GET /meetings/<id>": "Get specific meeting",
+            "GET /inbox": "Your action items and deadlines from meetings",
             "GET /health": "Health check"
         },
         "status": "ready"
