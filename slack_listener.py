@@ -23,6 +23,10 @@ from datetime import datetime
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from shared_memory import load_memory, save_memory, load_entities, save_entities
+from curated_parser import parse_curated_message, create_inbox_item
+from google_calendar import check_meeting_scheduled, create_event
+from datetime import timedelta
+import subprocess
 
 # Slack config
 SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN')
@@ -43,9 +47,19 @@ MONITOR_CHANNELS = {
     "C6STGEZ0R": "general",
     "C7HQ6V62C": "customer-experience",
     "C04A0Q69U0N": "pendo",
+    # Lucas's curated context channel - pasted DMs and important messages go here
+    "C0AFPAQ0KMF": "lucas-briefing",
+    # Help Center article ideas - triggers article pipeline processor
+    "C0AFK5PHE5Q": "help-center-ideas",
     # Private channels (need groups:read scope to access):
     # "gtm-weekly", "cx-external", "cx-internal", "it-jira-notifications"
 }
+
+# Special channel that triggers article pipeline
+ARTICLE_IDEAS_CHANNEL = "C0AFK5PHE5Q"
+
+# Special channel for curated content - gets fuller context capture
+CURATED_CHANNEL = "C0AFPAQ0KMF"
 
 # How far back to look (in seconds)
 LOOKBACK_SECONDS = 3600  # 1 hour
@@ -117,9 +131,10 @@ class SlackListener:
 
         return insights
 
-    def update_memory(self, insights, raw_text):
+    def update_memory(self, insights, raw_text, is_curated=False):
         """Update shared memory with insights."""
-        if not any([insights["customers_mentioned"],
+        # For curated content, always store it (Lucas decided it's important)
+        if not is_curated and not any([insights["customers_mentioned"],
                     insights["projects_mentioned"],
                     insights["themes"]]):
             return  # Nothing interesting
@@ -137,8 +152,64 @@ class SlackListener:
             "customers": insights["customers_mentioned"],
             "projects": insights["projects_mentioned"],
             "themes": insights["themes"],
-            "snippet": raw_text[:200] + "..." if len(raw_text) > 200 else raw_text,
         }
+
+        # Curated content gets full text (up to 1000 chars) since Lucas chose to share it
+        if is_curated:
+            observation["curated"] = True
+            observation["content"] = raw_text[:1000] + "..." if len(raw_text) > 1000 else raw_text
+
+            # Parse curated content for meetings, dates, people
+            parsed = parse_curated_message(raw_text)
+            if parsed['has_meeting']:
+                observation["parsed"] = {
+                    "meeting_date": parsed['meeting_date'],
+                    "people": parsed['people'],
+                    "topics": parsed['topics'][:3],
+                    "is_scheduled": parsed['is_scheduled'],
+                }
+
+                # Add to inbox if it looks like a meeting
+                inbox_item = create_inbox_item(parsed, source='curated')
+                if inbox_item:
+                    if "inbox" not in mem:
+                        mem["inbox"] = []
+                    mem["inbox"].append(inbox_item)
+                    mem["inbox"] = mem["inbox"][-100:]  # Keep manageable
+                    print(f"  → Meeting detected: {', '.join(parsed['people'])} on {parsed['meeting_date']}")
+
+                    # Auto-create calendar event if marked as scheduled and has date
+                    if parsed['is_scheduled'] and parsed['meeting_date'] and parsed['people']:
+                        # Check if meeting already exists
+                        person = parsed['people'][0]
+                        existing = check_meeting_scheduled(person, days_ahead=30)
+
+                        if not existing or parsed['meeting_date'] not in existing.get('date', ''):
+                            # Create calendar event
+                            try:
+                                from datetime import datetime as dt
+                                meeting_date = dt.strptime(parsed['meeting_date'], '%Y-%m-%d')
+                                # Default to 10am if no time specified
+                                meeting_time = meeting_date.replace(hour=10, minute=0)
+                                duration = parsed['duration_minutes'] or 30
+
+                                title = f"Meeting: {', '.join(parsed['people'][:2])}"
+                                if parsed['topics']:
+                                    title = f"{parsed['topics'][0][:40]}"
+
+                                event = create_event(
+                                    title=title,
+                                    start_time=meeting_time,
+                                    duration_minutes=duration,
+                                    description=f"Auto-created from Slack.\nPeople: {', '.join(parsed['people'])}\nTopics: {'; '.join(parsed['topics'][:3])}"
+                                )
+                                if event:
+                                    print(f"  → Calendar event created: {event['title']} on {event['date']}")
+                                    inbox_item['calendar_created'] = True
+                            except Exception as e:
+                                print(f"  → Could not create calendar event: {e}")
+        else:
+            observation["snippet"] = raw_text[:200] + "..." if len(raw_text) > 200 else raw_text
 
         mem["observations"].append(observation)
 
@@ -146,34 +217,97 @@ class SlackListener:
         mem["observations"] = mem["observations"][-100:]
 
         save_memory(mem)
-        print(f"  → Logged: {insights['themes']} | customers: {insights['customers_mentioned']}")
+
+        if not is_curated:
+            print(f"  → Logged: {insights['themes']} | customers: {insights['customers_mentioned']}")
 
     def scan_channel(self, channel_id, channel_name):
         """Scan a channel for insights."""
         messages = self.get_channel_history(channel_id)
         new_insights = 0
+        is_curated = (channel_id == CURATED_CHANNEL)
 
         for msg in messages:
             msg_ts = msg.get('ts')
             text = msg.get('text', '')
 
-            # Skip if already processed or bot message
+            # Skip if already processed
             if msg_ts in self.processed_messages:
                 continue
-            if msg.get('bot_id'):
+
+            # Skip bot messages UNLESS it's the curated channel (briefings are from bot)
+            if msg.get('bot_id') and not is_curated:
+                continue
+
+            # For curated channel, skip the morning briefing bot messages (they're output, not input)
+            # Only capture messages Lucas posts himself
+            if is_curated and msg.get('bot_id'):
                 continue
 
             self.processed_messages.add(msg_ts)
 
             # Extract and store insights
             insights = self.extract_insights(text, channel_name)
-            if any([insights["customers_mentioned"],
+
+            # Curated content always gets stored (Lucas chose to share it)
+            if is_curated and text.strip():
+                self.update_memory(insights, text, is_curated=True)
+                new_insights += 1
+            elif any([insights["customers_mentioned"],
                     insights["projects_mentioned"],
                     insights["themes"]]):
                 self.update_memory(insights, text)
                 new_insights += 1
 
         return new_insights
+
+    def trigger_article_pipeline(self):
+        """Trigger the help center article pipeline processor."""
+        try:
+            print("  → Triggering article pipeline processor...")
+            result = subprocess.run(
+                ['python3', '/Users/lucaswillett/projects/support-memory/help-center/process_article_ideas.py'],
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            if result.returncode == 0:
+                # Print last line of output (summary)
+                lines = result.stdout.strip().split('\n')
+                if lines:
+                    print(f"  → Pipeline: {lines[-1]}")
+            else:
+                print(f"  → Pipeline error: {result.stderr[:100]}")
+        except Exception as e:
+            print(f"  → Could not run pipeline: {e}")
+
+    def check_article_ideas_channel(self):
+        """Check for any new messages in #help-center-ideas (separate from insights)."""
+        try:
+            messages = self.get_channel_history(ARTICLE_IDEAS_CHANNEL, limit=20)
+            new_messages = 0
+            for msg in messages:
+                msg_ts = msg.get('ts')
+                if msg_ts in self.processed_messages:
+                    continue
+                # Skip bot messages and system messages
+                if msg.get('bot_id'):
+                    continue
+                if msg.get('subtype') in ['channel_join', 'channel_leave']:
+                    continue
+                text = msg.get('text', '')
+                if 'has joined the channel' in text:
+                    continue
+                # Skip threaded replies
+                if msg.get('thread_ts') and msg.get('thread_ts') != msg.get('ts'):
+                    continue
+                if len(text) >= 20:  # Minimum length for submission
+                    new_messages += 1
+                    self.processed_messages.add(msg_ts)
+            return new_messages
+        except Exception as e:
+            print(f"  Error checking article ideas: {e}")
+            return 0
 
     def run_once(self):
         """Single scan of all channels."""
@@ -186,7 +320,13 @@ class SlackListener:
                 print(f"  #{channel_name}: {count} new insights")
             total += count
 
-        if total == 0:
+        # Always check article ideas channel separately (doesn't need to match insight patterns)
+        article_count = self.check_article_ideas_channel()
+        if article_count > 0:
+            print(f"  #help-center-ideas: {article_count} new submission(s)")
+            self.trigger_article_pipeline()
+
+        if total == 0 and article_count == 0:
             print("  No new insights found")
         return total
 
