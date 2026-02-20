@@ -212,7 +212,7 @@ def get_slack_username(user_id):
     """Look up Slack username from user ID."""
     try:
         from slack_sdk import WebClient
-        client = WebClient(token=os.environ.get('SLACK_BOT_TOKEN', '***REDACTED***'))
+        client = WebClient(token=os.environ.get('SLACK_BOT_TOKEN'))
         result = client.users_info(user=user_id)
         if result['ok']:
             profile = result['user']['profile']

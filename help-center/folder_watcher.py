@@ -22,7 +22,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 # Config
-SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN', '***REDACTED***')
+SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN')
 STATE_FILE = Path(__file__).parent / "watcher_state.json"
 
 # Spreadsheet IDs
