@@ -13,7 +13,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 SCOPES = [
     'https://www.googleapis.com/auth/calendar.readonly',
     'https://www.googleapis.com/auth/calendar.events',
-    'https://www.googleapis.com/auth/tasks.readonly',
+    'https://www.googleapis.com/auth/tasks',
     'https://www.googleapis.com/auth/spreadsheets',  # Read + write to tracking sheet
     'https://www.googleapis.com/auth/drive',          # Access Drive folders and files
 ]

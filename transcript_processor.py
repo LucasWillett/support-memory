@@ -19,6 +19,28 @@ from shared_memory import load_memory, save_memory, load_entities
 # Your name variations (for detecting action items assigned to you)
 MY_NAMES = ['lucas', 'luke', 'support', 'support team']
 
+# Direct reports - track their wellness signals from meetings
+DIRECT_REPORTS = {
+    'christian': ['christian', 'christian staley'],
+    'hannah': ['hannah', 'hannah holbrook'],
+}
+
+# Stress indicators in speech patterns
+STRESS_PATTERNS = [
+    r'\b(overwhelmed|swamped|drowning|slammed|buried)\b',
+    r'\b(frustrated|annoying|annoyed|struggling)\b',
+    r'\b(worried|concerned|anxious|stressed)\b',
+    r"\b(can't keep up|too much|falling behind|behind on)\b",
+    r'\b(exhausted|tired|burnt out|burning out)\b',
+]
+
+# Positive indicators
+POSITIVE_PATTERNS = [
+    r'\b(excited|looking forward|enjoying|proud)\b',
+    r'\b(good progress|on track|ahead of|nailed|crushed)\b',
+    r'\b(feeling good|going well|things are good)\b',
+]
+
 # Signal patterns
 PATTERNS = {
     # Action items for you
@@ -102,10 +124,7 @@ def extract_signals(transcript, meeting_title=''):
     Extract actionable signals from a meeting transcript.
     Returns dict of categorized signals.
     """
-    if not transcript:
-        return {}
-
-    text = transcript.lower()
+    # Always return a properly structured dict
     signals = {
         'actions_for_me': [],
         'decisions': [],
@@ -116,6 +135,11 @@ def extract_signals(transcript, meeting_title=''):
         'customers_mentioned': [],
         'projects_mentioned': [],
     }
+
+    if not transcript:
+        return signals
+
+    text = str(transcript).lower()
 
     # Load known entities for cross-referencing
     entities = load_entities()
@@ -175,6 +199,97 @@ def extract_signals(transcript, meeting_title=''):
     return signals
 
 
+def extract_team_wellness(transcript, attendees=None):
+    """
+    Extract wellness signals for direct reports from meeting transcript.
+    Returns dict of {person: {stress_signals, positive_signals, topics}}.
+    """
+    if not transcript:
+        return {}
+
+    text = str(transcript).lower()
+    attendees_lower = [a.lower() for a in (attendees or [])]
+
+    team_signals = {}
+
+    for person_key, names in DIRECT_REPORTS.items():
+        # Check if this person was in the meeting
+        person_in_meeting = any(name in attendees_lower or name in text[:500] for name in names)
+
+        if not person_in_meeting:
+            continue
+
+        signals = {
+            'stress': [],
+            'positive': [],
+            'blockers': [],
+        }
+
+        # Look for stress patterns
+        for pattern in STRESS_PATTERNS:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            signals['stress'].extend(matches)
+
+        # Look for positive patterns
+        for pattern in POSITIVE_PATTERNS:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            signals['positive'].extend(matches)
+
+        # Look for blockers they raised
+        blocker_patterns = [
+            r"(?:i'm|i am) (?:blocked|waiting) on (.+?)(?:\.|$)",
+            r"(?:can't|cannot) (?:proceed|move forward) (?:until|without) (.+?)(?:\.|$)",
+        ]
+        for pattern in blocker_patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                signals['blockers'].append(match.group(1).strip()[:100])
+
+        # Calculate overall sentiment
+        stress_count = len(signals['stress'])
+        positive_count = len(signals['positive'])
+
+        if stress_count > positive_count + 2:
+            signals['sentiment'] = 'stressed'
+        elif positive_count > stress_count + 2:
+            signals['sentiment'] = 'positive'
+        else:
+            signals['sentiment'] = 'neutral'
+
+        team_signals[person_key] = signals
+
+    return team_signals
+
+
+def log_team_wellness_from_meeting(team_signals, meeting_title):
+    """Log team wellness signals from a meeting to memory."""
+    if not team_signals:
+        return
+
+    try:
+        from team_wellness import log_team_update
+    except ImportError:
+        return
+
+    for person, signals in team_signals.items():
+        if signals['sentiment'] != 'neutral' or signals['blockers']:
+            content_parts = [f"From: {meeting_title}"]
+            if signals['sentiment'] == 'stressed':
+                content_parts.append(f"Seemed stressed ({len(signals['stress'])} stress signals)")
+            elif signals['sentiment'] == 'positive':
+                content_parts.append(f"Seemed positive ({len(signals['positive'])} positive signals)")
+            if signals['blockers']:
+                content_parts.append(f"Blockers: {signals['blockers'][0]}")
+
+            mood = 2 if signals['sentiment'] == 'stressed' else 4 if signals['sentiment'] == 'positive' else 3
+
+            log_team_update(
+                person=person,
+                update_type='meeting',
+                content=' | '.join(content_parts),
+                mood=mood
+            )
+
+
 def process_meeting(meeting_data):
     """
     Process a meeting from Fathom webhook and store extracted signals.
@@ -193,24 +308,63 @@ def process_meeting(meeting_data):
     summary = meeting_data.get('summary', '')
     fathom_actions = meeting_data.get('action_items', [])
 
-    # Extract signals from transcript
-    signals = extract_signals(transcript, title)
+    # Ensure transcript and summary are strings
+    if isinstance(transcript, list):
+        transcript = ' '.join([str(t) for t in transcript])
+    if isinstance(transcript, dict):
+        transcript = transcript.get('text', str(transcript))
+    if isinstance(summary, list):
+        summary = ' '.join([str(s) for s in summary])
+    if isinstance(summary, dict):
+        summary = summary.get('text', summary.get('summary', str(summary)))
 
-    # Also check summary for signals
-    if summary:
-        summary_signals = extract_signals(summary, title)
-        for key in signals:
-            signals[key].extend(summary_signals.get(key, []))
-            signals[key] = list(set(signals[key]))
+    # Initialize empty signals - use Fathom's extracted items only
+    signals = {
+        'actions_for_me': [],
+        'decisions': [],
+        'commitments': [],
+        'follow_ups': [],
+        'deadlines': [],
+        'blockers': [],
+        'customers_mentioned': [],
+        'projects_mentioned': [],
+    }
 
-    # Merge Fathom's action items
+    # Use Fathom's action items - filter to only items assigned to Lucas
+    my_names = ['lucas', 'luke', 'lucas willett', 'lucaswillett']
+    my_emails = ['lucas@visitingmedia.com', 'lucas.willett@']
+
     if fathom_actions:
         if isinstance(fathom_actions, list):
             for item in fathom_actions:
-                if isinstance(item, str):
-                    signals['follow_ups'].append(item)
+                action_text = None
+                is_mine = False
+
+                if isinstance(item, str) and len(item) > 10:
+                    action_text = item
+                    is_mine = True  # No assignee info, include it
                 elif isinstance(item, dict):
-                    signals['follow_ups'].append(item.get('text', str(item)))
+                    action_text = item.get('text') or item.get('content') or item.get('description')
+
+                    # Check assignee
+                    assignee = item.get('assignee', {})
+                    if assignee:
+                        assignee_name = (assignee.get('name') or '').lower()
+                        assignee_email = (assignee.get('email') or '').lower()
+
+                        # Check if assigned to me
+                        if any(n in assignee_name for n in my_names):
+                            is_mine = True
+                        if any(e in assignee_email for e in my_emails):
+                            is_mine = True
+                    else:
+                        # No assignee specified - might be general, skip it
+                        is_mine = False
+
+                # Filter out garbage and only include mine
+                if is_mine and action_text and len(action_text) > 10 and len(action_text) < 500:
+                    if '{' not in action_text and 'speaker' not in action_text.lower():
+                        signals['follow_ups'].append(action_text.strip())
 
     # Build meeting record for memory
     meeting_record = {
@@ -225,6 +379,13 @@ def process_meeting(meeting_data):
         'has_actions': bool(signals['actions_for_me'] or signals['follow_ups']),
     }
 
+    # Extract team wellness signals from meetings with direct reports
+    attendees = meeting_data.get('attendees', [])
+    team_signals = extract_team_wellness(transcript, attendees)
+    if team_signals:
+        meeting_record['team_wellness'] = team_signals
+        log_team_wellness_from_meeting(team_signals, title)
+
     # Store in memory
     mem = load_memory()
 
@@ -236,12 +397,38 @@ def process_meeting(meeting_data):
     # Keep last 50 meetings
     mem['meetings'] = mem['meetings'][-50:]
 
-    # Also add urgent items to a "inbox" for quick reference
-    if signals['actions_for_me'] or signals['deadlines'] or signals['blockers']:
+    # Add action items and follow-ups to Google Tasks (source of truth)
+    try:
+        from google_tasks import create_task
+        action_items = signals['actions_for_me'] + signals['follow_ups']
+        for action in action_items:
+            create_task(
+                title=action[:500],
+                notes=f"From meeting: {title} ({meeting_record['date']})"
+            )
+        for deadline in signals['deadlines']:
+            create_task(
+                title=deadline[:500],
+                notes=f"Deadline from: {title} ({meeting_record['date']})"
+            )
+    except Exception as e:
+        print(f"  Could not write to Google Tasks: {e}")
+
+    # Also keep inbox in memory.json for legacy reference
+    if signals['actions_for_me'] or signals['follow_ups'] or signals['deadlines'] or signals['blockers']:
         if 'inbox' not in mem:
             mem['inbox'] = []
 
         for action in signals['actions_for_me']:
+            mem['inbox'].append({
+                'type': 'action',
+                'from_meeting': title,
+                'date': meeting_record['date'],
+                'content': action,
+                'status': 'open',
+            })
+
+        for action in signals['follow_ups']:
             mem['inbox'].append({
                 'type': 'action',
                 'from_meeting': title,
@@ -259,7 +446,6 @@ def process_meeting(meeting_data):
                 'status': 'open',
             })
 
-        # Keep inbox manageable
         mem['inbox'] = mem['inbox'][-100:]
 
     save_memory(mem)
