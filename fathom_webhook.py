@@ -24,13 +24,97 @@ except ImportError:
     PROCESSOR_AVAILABLE = False
     print("Warning: transcript_processor not available")
 
+# Google Sheets persistence
+try:
+    from googleapiclient.discovery import build
+    from google_auth import get_credentials
+    SHEETS_AVAILABLE = True
+except ImportError:
+    SHEETS_AVAILABLE = False
+
 app = Flask(__name__)
 
 WEBHOOK_SECRET = os.environ.get('FATHOM_WEBHOOK_SECRET', '')
 
-# In-memory storage (for Render - use DB for production persistence)
+# Meetings log sheet — create one sheet to store all meetings persistently
+MEETINGS_SHEET_ID = os.environ.get('MEETINGS_SHEET_ID', '')
+
+# In-memory cache (loaded from Sheets on startup)
 meetings_store = []
 MAX_MEETINGS = 100
+
+
+def get_sheets_service():
+    if not SHEETS_AVAILABLE:
+        return None
+    creds = get_credentials()
+    if not creds:
+        return None
+    return build('sheets', 'v4', credentials=creds)
+
+
+def load_meetings_from_sheets():
+    """Load recent meetings from Google Sheets on startup."""
+    if not MEETINGS_SHEET_ID:
+        return []
+    try:
+        service = get_sheets_service()
+        if not service:
+            return []
+        result = service.spreadsheets().values().get(
+            spreadsheetId=MEETINGS_SHEET_ID,
+            range='Meetings!A2:G'
+        ).execute()
+        rows = result.get('values', [])
+        meetings = []
+        for row in rows[-MAX_MEETINGS:]:
+            if len(row) >= 4:
+                meetings.append({
+                    'id': row[0] if len(row) > 0 else '',
+                    'title': row[1] if len(row) > 1 else '',
+                    'received_at': row[2] if len(row) > 2 else '',
+                    'attendees': json.loads(row[3]) if len(row) > 3 else [],
+                    'summary': row[4] if len(row) > 4 else '',
+                    'action_items': json.loads(row[5]) if len(row) > 5 else [],
+                    'recording_url': row[6] if len(row) > 6 else '',
+                })
+        print(f"Loaded {len(meetings)} meetings from Sheets")
+        return meetings
+    except Exception as e:
+        print(f"Could not load meetings from Sheets: {e}")
+        return []
+
+
+def save_meeting_to_sheets(meeting):
+    """Append a single meeting row to Google Sheets."""
+    if not MEETINGS_SHEET_ID:
+        return
+    try:
+        service = get_sheets_service()
+        if not service:
+            return
+        row = [
+            meeting.get('id', ''),
+            meeting.get('title', ''),
+            meeting.get('received_at', ''),
+            json.dumps(meeting.get('attendees', [])),
+            meeting.get('summary', '')[:500],
+            json.dumps(meeting.get('action_items', [])),
+            meeting.get('recording_url', ''),
+        ]
+        service.spreadsheets().values().append(
+            spreadsheetId=MEETINGS_SHEET_ID,
+            range='Meetings!A:G',
+            valueInputOption='RAW',
+            body={'values': [row]}
+        ).execute()
+        print(f"  Saved meeting to Sheets: {meeting.get('title')}")
+    except Exception as e:
+        print(f"  Could not save to Sheets: {e}")
+
+
+# Load existing meetings on startup
+meetings_store = load_meetings_from_sheets()
 
 
 def verify_signature(payload, signature):
@@ -84,8 +168,9 @@ def fathom_webhook():
         "raw_data": data  # Store full payload for debugging
     }
 
-    # Add to store
+    # Add to store and persist to Sheets
     meetings_store.append(meeting_record)
+    save_meeting_to_sheets(meeting_record)
 
     # Trim to max size
     while len(meetings_store) > MAX_MEETINGS:

@@ -25,6 +25,7 @@ SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN')
 # Channels to monitor
 CHANNELS = {
     'C05U74HDVLH': 'support-internal',
+    'C0AGULNT9EU': 'lucas-bot-testing',
 }
 
 # Lucas's Slack user ID for tagging on zero-result crawls

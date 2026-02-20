@@ -140,25 +140,54 @@ def create_event(title, start_time, duration_minutes=30, description='', attende
 def _format_event(event):
     """Format a calendar event for internal use."""
     start = event.get('start', {})
-    start_time = start.get('dateTime', start.get('date', ''))
+    end = event.get('end', {})
+    start_raw = start.get('dateTime', start.get('date', ''))
+    end_raw = end.get('dateTime', end.get('date', ''))
 
-    # Parse the datetime
-    if 'T' in start_time:
-        dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-        time_str = dt.strftime('%I:%M %p')
+    start_iso = ''
+    end_iso = ''
+    time_str = ''
+    end_time_str = ''
+    date_str = ''
+
+    if 'T' in start_raw:
+        dt = datetime.fromisoformat(start_raw.replace('Z', '+00:00'))
+        time_str = dt.strftime('%I:%M %p').lstrip('0')
         date_str = dt.strftime('%Y-%m-%d')
+        start_iso = dt.isoformat()
     else:
         time_str = 'All day'
-        date_str = start_time
+        date_str = start_raw
+        start_iso = start_raw
+
+    if 'T' in end_raw:
+        end_dt = datetime.fromisoformat(end_raw.replace('Z', '+00:00'))
+        end_time_str = end_dt.strftime('%I:%M %p').lstrip('0')
+        end_iso = end_dt.isoformat()
+    else:
+        end_iso = end_raw
+
+    # Build attendee display names (skip self)
+    attendees_display = []
+    for a in event.get('attendees', []):
+        if a.get('self'):
+            continue
+        name = a.get('displayName') or a.get('email', '').split('@')[0].replace('.', ' ').title()
+        attendees_display.append(name)
 
     return {
         'id': event.get('id'),
         'title': event.get('summary', 'No title'),
         'date': date_str,
         'time': time_str,
+        'end_time': end_time_str,
+        'start_iso': start_iso,
+        'end_iso': end_iso,
         'description': event.get('description', ''),
         'attendees': [a.get('email', '') for a in event.get('attendees', [])],
+        'attendees_display': attendees_display,
         'link': event.get('htmlLink', ''),
+        'color_id': event.get('colorId', ''),  # Empty string = calendar default (keep)
     }
 
 

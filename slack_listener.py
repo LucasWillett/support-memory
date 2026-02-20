@@ -25,6 +25,7 @@ from slack_sdk.errors import SlackApiError
 from shared_memory import load_memory, save_memory, load_entities, save_entities
 from curated_parser import parse_curated_message, create_inbox_item
 from google_calendar import check_meeting_scheduled, create_event
+from heartbeat import process_capture, parse_capture
 from datetime import timedelta
 import subprocess
 
@@ -235,14 +236,18 @@ class SlackListener:
             if msg_ts in self.processed_messages:
                 continue
 
-            # Skip bot messages UNLESS it's the curated channel (briefings are from bot)
+            # Skip bot messages UNLESS it's the curated channel
             if msg.get('bot_id') and not is_curated:
                 continue
 
-            # For curated channel, skip the morning briefing bot messages (they're output, not input)
-            # Only capture messages Lucas posts himself
+            # For curated channel, allow specific bots (Granola, Fathom) but skip our own bots
             if is_curated and msg.get('bot_id'):
-                continue
+                bot_name = msg.get('username', '').lower()
+                # Allow meeting note bots through
+                allowed_bots = ['granola', 'fathom', 'otter', 'fireflies']
+                if not any(allowed in bot_name for allowed in allowed_bots):
+                    # Skip our own bot output (morning briefing, etc.)
+                    continue
 
             self.processed_messages.add(msg_ts)
 
@@ -251,7 +256,30 @@ class SlackListener:
 
             # Curated content always gets stored (Lucas chose to share it)
             if is_curated and text.strip():
-                self.update_memory(insights, text, is_curated=True)
+                # Check if this is a capture request (paper notes)
+                text_lower = text.lower()
+                is_capture = any(trigger in text_lower for trigger in ['capture:', 'notes:', 'brain dump:', 'paper notes:'])
+                if not is_capture and (text.strip().startswith('-') or text.strip().startswith('•')):
+                    # Bullet points might be a capture
+                    if '\n' in text or len(text.split('-')) > 2:
+                        is_capture = True
+
+                if is_capture:
+                    # Process as paper notes capture
+                    user = msg.get('user', '')
+                    try:
+                        response = process_capture(text, user)
+                        # Reply in thread
+                        self.client.chat_postMessage(
+                            channel=channel_id,
+                            thread_ts=msg_ts,
+                            text=response
+                        )
+                        print(f"  → Captured paper notes: {len(parse_capture(text))} items")
+                    except Exception as e:
+                        print(f"  → Capture error: {e}")
+                else:
+                    self.update_memory(insights, text, is_curated=True)
                 new_insights += 1
             elif any([insights["customers_mentioned"],
                     insights["projects_mentioned"],
