@@ -18,13 +18,39 @@ Usage:
 import os
 import sys
 import time
+import json
 import subprocess
 from datetime import datetime
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+# Usage tracking
+USAGE_FILE = "/Users/lucaswillett/projects/support-memory/command_usage.json"
+
+def load_usage():
+    """Load command usage counts."""
+    try:
+        with open(USAGE_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_usage(usage):
+    """Save command usage counts."""
+    try:
+        with open(USAGE_FILE, 'w') as f:
+            json.dump(usage, f, indent=2)
+    except Exception:
+        pass
+
+def track_usage(cmd):
+    """Increment usage count for a command."""
+    usage = load_usage()
+    usage[cmd] = usage.get(cmd, 0) + 1
+    save_usage(usage)
+
 # Config
-SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN', '***REDACTED***')
+SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN')
 COMMAND_CHANNEL = "C0AFPAQ0KMF"  # #lucas-briefing
 LUCAS_USER_ID = "U9NLNTPDK"
 
@@ -65,6 +91,26 @@ COMMANDS = {
     "services": {
         "description": "Show launchd service status",
         "handler": "cmd_services",
+    },
+    "heartbeat": {
+        "description": "Send daily check-in with tasks and capture prompt",
+        "handler": "cmd_heartbeat",
+    },
+    "gtasks": {
+        "description": "Show open Google Tasks",
+        "handler": "cmd_gtasks",
+    },
+    "done": {
+        "description": "Complete a task by name (e.g., !done zendesk)",
+        "handler": "cmd_done_task",
+    },
+    "add": {
+        "description": "Add a new Google Task (e.g., !add Review Q1 metrics)",
+        "handler": "cmd_add_task",
+    },
+    "zaps": {
+        "description": "Show Zapier status (requires saved session)",
+        "handler": "cmd_zaps",
     },
 }
 
@@ -211,12 +257,121 @@ def cmd_services(thread_ts):
 
 
 def cmd_help(thread_ts):
-    """Show help."""
+    """Show help, sorted by usage frequency."""
+    usage = load_usage()
+
+    # Sort commands by usage (most used first)
+    sorted_cmds = sorted(
+        COMMANDS.items(),
+        key=lambda x: usage.get(x[0], 0),
+        reverse=True
+    )
+
     help_text = "*Available Commands:*\n\n"
-    for cmd, info in COMMANDS.items():
-        help_text += f"`!{cmd}` - {info['description']}\n"
-    help_text += "\n_Commands only work for authorized users._"
+    for cmd, info in sorted_cmds:
+        count = usage.get(cmd, 0)
+        freq = f" _({count})_" if count > 0 else ""
+        help_text += f"`!{cmd}` - {info['description']}{freq}\n"
+    help_text += "\n_Sorted by usage. Commands only work for authorized users._"
     post_reply(help_text, thread_ts)
+
+
+def cmd_heartbeat(thread_ts):
+    """Send heartbeat check-in."""
+    output = run_script(f"{SUPPORT_MEMORY_DIR}/heartbeat.py", ["heartbeat"], timeout=30)
+    post_reply("💓 Heartbeat sent to channel.", thread_ts)
+
+
+def cmd_gtasks(thread_ts):
+    """Show open Google Tasks by category."""
+    try:
+        import sys
+        sys.path.insert(0, SUPPORT_MEMORY_DIR)
+        from google_tasks import get_all_tasks_by_category
+
+        categories = get_all_tasks_by_category()
+        if categories:
+            total = sum(len(t) for t in categories.values())
+            output = f"*📋 Google Tasks* ({total} across {len(categories)} categories)\n\n"
+
+            for cat_name, tasks in categories.items():
+                output += f"*{cat_name}* ({len(tasks)})\n"
+                for t in tasks[:3]:
+                    title = t['title'][:45]
+                    if 'http' in title:
+                        title = title.split('http')[0].strip() + '...'
+                    output += f"  • {title}\n"
+                if len(tasks) > 3:
+                    output += f"  _+{len(tasks) - 3} more_\n"
+                output += "\n"
+
+            post_reply(output, thread_ts)
+        else:
+            post_reply("No open Google Tasks.", thread_ts)
+    except Exception as e:
+        post_reply(f"Error fetching tasks: {e}", thread_ts)
+
+
+def cmd_done_task(thread_ts, search_text=None):
+    """Complete a task by partial title match."""
+    if not search_text:
+        post_reply("Usage: `!done [search term]`\nExample: `!done zendesk` to complete task containing 'zendesk'", thread_ts)
+        return
+
+    try:
+        import sys
+        sys.path.insert(0, SUPPORT_MEMORY_DIR)
+        from google_tasks import complete_task_by_title, find_task_by_title
+
+        # First show what we found
+        task, list_id = find_task_by_title(search_text)
+        if not task:
+            post_reply(f"❌ No task found matching '{search_text}'", thread_ts)
+            return
+
+        # Complete it
+        result = complete_task_by_title(search_text)
+        if result:
+            post_reply(f"✅ Completed: *{task['title'][:60]}*", thread_ts)
+        else:
+            post_reply(f"❌ Error completing task", thread_ts)
+    except Exception as e:
+        post_reply(f"Error: {e}", thread_ts)
+
+
+def cmd_add_task(thread_ts, task_title=None):
+    """Add a new Google Task."""
+    if not task_title:
+        post_reply("Usage: `!add [task title]`\nExample: `!add Review Q1 metrics`", thread_ts)
+        return
+
+    try:
+        import sys
+        sys.path.insert(0, SUPPORT_MEMORY_DIR)
+        from google_tasks import create_task
+
+        result = create_task(task_title)
+        if result:
+            post_reply(f"✅ Added task: *{task_title}*", thread_ts)
+        else:
+            post_reply(f"❌ Error adding task", thread_ts)
+    except Exception as e:
+        post_reply(f"Error: {e}", thread_ts)
+
+
+def cmd_zaps(thread_ts):
+    """Show Zapier status via Playwright."""
+    post_reply("🔌 Checking Zapier status...", thread_ts)
+    try:
+        import sys
+        sys.path.insert(0, f"{SUPPORT_MEMORY_DIR}/browser")
+        from zapier_status import get_zap_status, format_for_slack
+
+        results = get_zap_status()
+        output = format_for_slack(results)
+        post_reply(output, thread_ts)
+    except Exception as e:
+        post_reply(f"Error: {e}\n\nTo set up: `python session_manager.py save zapier`", thread_ts)
 
 
 class CommandBot:
@@ -271,8 +426,14 @@ class CommandBot:
                 for cmd, info in COMMANDS.items():
                     if cmd_text == cmd or cmd_text.startswith(cmd + ' '):
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] Running: !{cmd}")
+                        track_usage(cmd)  # Track usage for sorting
                         handler = globals()[info['handler']]
-                        handler(msg_ts)
+                        # Extract arguments (everything after the command)
+                        args = cmd_text[len(cmd):].strip() if cmd_text.startswith(cmd + ' ') else None
+                        if args and cmd in ['done', 'add']:
+                            handler(msg_ts, args)
+                        else:
+                            handler(msg_ts)
                         matched = True
                         break
 

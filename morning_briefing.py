@@ -64,7 +64,7 @@ except (ImportError, Exception):
     TEAM_WELLNESS_AVAILABLE = False
 
 # Config
-SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN', '***REDACTED***')
+SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN')
 BRIEFING_CHANNEL = "C0AFPAQ0KMF"  # #lucas-briefing
 MY_SLACK_EMAIL = "lucas@visitingmedia.com"  # Used to find your user ID
 MY_SLACK_USER_ID = "U9NLNTPDK"  # Lucas

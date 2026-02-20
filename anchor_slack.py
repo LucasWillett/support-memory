@@ -15,7 +15,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 # Use same token as other bots
-SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN', '***REDACTED***')
+SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN')
 
 # Known channels
 CHANNELS = {

@@ -25,7 +25,7 @@ except ImportError:
     print("Note: Google Drive sync not available")
 
 # Config
-SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN', '***REDACTED***')
+SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN')
 CHANNEL_ID = "C0AFK5PHE5Q"  # #help-center-ideas
 PROCESSED_EMOJI = "memo"  # Mark processed submissions
 
