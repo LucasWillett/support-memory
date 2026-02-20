@@ -28,12 +28,18 @@ except (ImportError, Exception):
         return []
 
 try:
-    from google_tasks import get_all_open_tasks
+    from google_tasks import get_all_open_tasks, categorize_tasks, complete_task_by_title, get_all_tasks_by_category
     GTASKS_AVAILABLE = True
 except (ImportError, Exception):
     GTASKS_AVAILABLE = False
     def get_all_open_tasks():
         return []
+    def categorize_tasks(tasks):
+        return {'actionable': tasks, 'learning': [], 'reference': []}
+    def complete_task_by_title(text):
+        return None
+    def get_all_tasks_by_category():
+        return {}
 
 try:
     from google_sheets import get_my_projects, get_my_gtm_items
@@ -78,11 +84,6 @@ def build_briefing():
     """Build the morning briefing content."""
     mem = load_memory()
 
-    # Get inbox items
-    inbox = mem.get('inbox', [])
-    open_actions = [i for i in inbox if i.get('status') == 'open' and i.get('type') == 'action']
-    open_deadlines = [i for i in inbox if i.get('status') == 'open' and i.get('type') == 'deadline']
-
     # Get recent meetings (last 3 days)
     meetings = mem.get('meetings', [])[-10:]
 
@@ -110,28 +111,51 @@ def build_briefing():
     # Get recent observations from Slack
     observations = mem.get('observations', [])[-10:]
 
+    # Fetch Google Tasks early — source of truth for "on your plate"
+    top_tasks = []
+    tasks_by_category = {}
+    try:
+        tasks_by_category = get_all_tasks_by_category()
+        for tasks in tasks_by_category.values():
+            top_tasks.extend(tasks)
+        top_tasks = top_tasks[:5]
+    except Exception:
+        try:
+            top_tasks = get_all_open_tasks()[:5]
+        except Exception:
+            top_tasks = []
+
     # Build message blocks
     blocks = []
 
-    # Header - Lucas voice: direct, human
+    # Header — greeting based on Google Tasks count
     today = datetime.now().strftime("%A")
-
-    # Craft greeting based on what's on the plate
-    if len(open_actions) == 0:
-        greeting = f"Hey Lucas—light {today}. Nothing urgent on your plate."
-    elif len(open_actions) == 1:
-        greeting = f"Hey Lucas—one thing needs your attention today."
-    elif len(open_actions) <= 3:
-        greeting = f"Hey Lucas—{len(open_actions)} things on your plate today."
+    task_count = len(top_tasks)
+    if task_count == 0:
+        greeting = f"Hey Lucas—light {today}. Nothing in your task list."
+    elif task_count == 1:
+        greeting = f"Hey Lucas—one thing on your plate today."
+    elif task_count <= 3:
+        greeting = f"Hey Lucas—{task_count} things on your plate today."
     else:
-        greeting = f"Hey Lucas—busy day ahead. {len(open_actions)} items need attention."
+        greeting = f"Hey Lucas—busy day ahead. {task_count}+ tasks in your list."
 
     blocks.append({
         "type": "section",
         "text": {"type": "mrkdwn", "text": f"*{greeting}*"}
     })
 
-    # Today's Calendar (if Google Calendar connected)
+    # Top tasks — shown right after greeting
+    if top_tasks:
+        task_text = ""
+        for t in top_tasks:
+            title = t['title'][:80]
+            if 'http' in title:
+                title = title.split('http')[0].strip() + '...'
+            task_text += f"• {title}\n"
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": task_text}})
+
+    # Today's Calendar
     try:
         cal_events = get_todays_events()
         if cal_events:
@@ -140,45 +164,26 @@ def build_briefing():
                 cal_text += f"• {event['time']}: {event['title'][:50]}\n"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": cal_text}})
     except Exception:
-        pass  # Gracefully skip if calendar not configured
-
-    # Action Items - direct, no fluff
-    if open_actions:
-        action_text = ""
-        for item in open_actions[:5]:
-            content = item['content'][:100] + '...' if len(item['content']) > 100 else item['content']
-            action_text += f"• {content}\n"
-        if len(open_actions) > 5:
-            action_text += f"_...plus {len(open_actions) - 5} more_\n"
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": action_text}})
-
-    # Deadlines - only show if there are any
-    if open_deadlines:
-        deadline_text = "*Deadlines coming up:*\n"
-        for item in open_deadlines[:3]:
-            content = str(item['content'])[:60] + '...' if len(str(item['content'])) > 60 else str(item['content'])
-            deadline_text += f"• {content}\n"
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": deadline_text}})
-
-    # Google Tasks (if connected)
-    try:
-        tasks = get_all_open_tasks()
-        if tasks:
-            blocks.append({"type": "divider"})
-            # Show tasks with due dates first, then others
-            due_tasks = [t for t in tasks if t.get('due')]
-            other_tasks = [t for t in tasks if not t.get('due')]
-            show_tasks = (due_tasks + other_tasks)[:5]
-
-            tasks_text = "*Google Tasks:*\n"
-            for t in show_tasks:
-                due = f" _(due {t['due']})_" if t.get('due') else ""
-                tasks_text += f"• {t['title'][:60]}{due}\n"
-            if len(tasks) > 5:
-                tasks_text += f"_...plus {len(tasks) - 5} more_\n"
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": tasks_text}})
-    except Exception:
         pass
+
+    # Full Google Tasks by category (below the fold)
+    if tasks_by_category:
+        blocks.append({"type": "divider"})
+        total_tasks = sum(len(t) for t in tasks_by_category.values())
+        tasks_text = f"*📋 Google Tasks* ({total_tasks} open)\n\n"
+        for cat_name, tasks in list(tasks_by_category.items())[:5]:
+            if cat_name == 'Uncategorized':
+                continue
+            cat_count = len(tasks)
+            tasks_text += f"*{cat_name}* ({cat_count})\n"
+            for t in tasks[:2]:
+                title = t['title'][:45]
+                if 'http' in title:
+                    title = title.split('http')[0].strip() + '...'
+                tasks_text += f"  • {title}\n"
+            if cat_count > 2:
+                tasks_text += f"  _+{cat_count - 2} more_\n"
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": tasks_text}})
 
     # GTM Items (canonical deadlines from tracking sheet)
     try:
