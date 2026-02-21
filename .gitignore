@@ -16,5 +16,8 @@ memory.json
 entities.json
 council_prompts.json
 
+# Private strategy docs
+HELM_PRODUCT.md
+
 # OS
 .DS_Store

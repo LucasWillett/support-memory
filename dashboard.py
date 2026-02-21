@@ -445,6 +445,127 @@ DASHBOARD_HTML = """
 
   .helm-task-text { font-size: 13px; color: #b0b0c8; flex: 1; line-height: 1.4; }
 
+  /* Meeting Prep Panel */
+  .prep-btn {
+    font-size: 10px;
+    font-weight: 600;
+    color: #7c6af7;
+    background: #1e1a3a;
+    border: none;
+    border-radius: 4px;
+    padding: 2px 7px;
+    cursor: pointer;
+    flex-shrink: 0;
+    margin-left: auto;
+    letter-spacing: 0.3px;
+    opacity: 0.8;
+  }
+  .prep-btn:hover { opacity: 1; background: #2a2250; }
+
+  .prep-panel {
+    position: fixed;
+    top: 0; right: 0;
+    width: 420px;
+    height: 100vh;
+    background: #18181f;
+    border-left: 1px solid #2a2a35;
+    z-index: 500;
+    display: flex;
+    flex-direction: column;
+    transform: translateX(100%);
+    transition: transform 0.22s ease;
+    box-shadow: -8px 0 32px #00000066;
+  }
+  .prep-panel.open { transform: translateX(0); }
+
+  .prep-panel-header {
+    padding: 16px 18px 12px;
+    border-bottom: 1px solid #2a2a35;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .prep-panel-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #e2e2e8;
+    line-height: 1.3;
+  }
+  .prep-panel-sub {
+    font-size: 12px;
+    color: #555;
+    margin-top: 3px;
+  }
+  .prep-close {
+    background: none;
+    border: none;
+    color: #555;
+    font-size: 20px;
+    cursor: pointer;
+    line-height: 1;
+    padding: 0;
+    flex-shrink: 0;
+  }
+  .prep-close:hover { color: #ccc; }
+
+  .prep-panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 18px;
+  }
+
+  .prep-loading {
+    color: #555;
+    font-size: 13px;
+    text-align: center;
+    padding: 40px 0;
+  }
+  .prep-loading-dot {
+    display: inline-block;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:0.3} 50%{opacity:1} }
+
+  .prep-section {
+    margin-bottom: 18px;
+  }
+  .prep-section-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: #444;
+    margin-bottom: 8px;
+  }
+  .prep-brief {
+    font-size: 13px;
+    color: #c8c8d8;
+    line-height: 1.65;
+    white-space: pre-wrap;
+  }
+  .prep-task-item {
+    font-size: 13px;
+    color: #a0a0b8;
+    padding: 5px 0;
+    border-bottom: 1px solid #1e1e28;
+    line-height: 1.4;
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+  }
+  .prep-task-item:last-child { border-bottom: none; }
+  .prep-task-dot { color: #3a3a50; flex-shrink: 0; }
+
+  .prep-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: #00000044;
+    z-index: 499;
+  }
+  .prep-overlay.open { display: block; }
+
   /* Weather */
   .weather-now {
     padding: 14px 16px 10px;
@@ -612,6 +733,20 @@ DASHBOARD_HTML = """
 
 <div class="toast" id="toast"></div>
 
+<div class="prep-overlay" id="prep-overlay" onclick="closePrepPanel()"></div>
+<div class="prep-panel" id="prep-panel">
+  <div class="prep-panel-header">
+    <div>
+      <div class="prep-panel-title" id="prep-panel-title">Meeting Prep</div>
+      <div class="prep-panel-sub" id="prep-panel-sub"></div>
+    </div>
+    <button class="prep-close" onclick="closePrepPanel()">✕</button>
+  </div>
+  <div class="prep-panel-body" id="prep-panel-body">
+    <div class="prep-loading">Loading brief...</div>
+  </div>
+</div>
+
 <script>
 function showToast(msg) {
   const t = document.getElementById('toast');
@@ -727,12 +862,16 @@ async function loadMeetings() {
         const attendees = (e.attendees_display || []).slice(0, 3).join(', ');
         const metaStr = attendees || (e.end_time ? `Until ${e.end_time}` : '');
         const nowPip = status === 'now' ? ' 🟢' : '';
+        const prepAttendees = encodeURIComponent(JSON.stringify(e.attendees_display || []));
+        const prepTitle = encodeURIComponent(e.title);
+        const prepBtn = `<button class="prep-btn" onclick="openPrepPanel(event,'${prepTitle}','${prepAttendees}','${encodeURIComponent(e.time||'')}')">Prep ▶</button>`;
         const inner = `<div class="cal-time">${timeLabel}</div>
           <div class="cal-dot"></div>
           <div class="cal-body">
             <div class="cal-title">${e.title}${nowPip}</div>
             ${metaStr ? `<div class="cal-meta">${metaStr}</div>` : ''}
-          </div>`;
+          </div>
+          ${status !== 'past' ? prepBtn : ''}`;
         if (e.link) {
           html += `<div class="cal-event ${status}"><a class="cal-link" href="${e.link}" target="_blank" style="display:contents">${inner}</a></div>`;
         } else {
@@ -819,6 +958,49 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitCapture(); }
   });
 });
+
+function openPrepPanel(evt, titleEnc, attendeesEnc, timeEnc) {
+  evt.preventDefault(); evt.stopPropagation();
+  const title = decodeURIComponent(titleEnc);
+  const attendees = JSON.parse(decodeURIComponent(attendeesEnc));
+  const time = decodeURIComponent(timeEnc);
+  document.getElementById('prep-panel-title').textContent = title;
+  document.getElementById('prep-panel-sub').textContent = attendees.length ? attendees.join(', ') : time;
+  document.getElementById('prep-panel-body').innerHTML = '<div class="prep-loading"><span class="prep-loading-dot">●</span> Building your brief...</div>';
+  document.getElementById('prep-panel').classList.add('open');
+  document.getElementById('prep-overlay').classList.add('open');
+
+  fetch('/api/meeting-prep', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title, attendees, time})
+  })
+  .then(r => r.json())
+  .then(data => {
+    const body = document.getElementById('prep-panel-body');
+    let html = '';
+    if (data.brief) {
+      html += `<div class="prep-section"><div class="prep-section-label">Brief</div><div class="prep-brief">${data.brief}</div></div>`;
+    }
+    if (data.tasks && data.tasks.length) {
+      html += `<div class="prep-section"><div class="prep-section-label">Open Items (${data.tasks.length})</div>`;
+      for (const t of data.tasks) {
+        html += `<div class="prep-task-item"><span class="prep-task-dot">◦</span><span>${t}</span></div>`;
+      }
+      html += '</div>';
+    }
+    if (!html) html = '<div class="prep-loading">No context found yet — add meeting notes via Quick Capture to build history.</div>';
+    body.innerHTML = html;
+  })
+  .catch(() => {
+    document.getElementById('prep-panel-body').innerHTML = '<div class="prep-loading">Could not generate brief.</div>';
+  });
+}
+
+function closePrepPanel() {
+  document.getElementById('prep-panel').classList.remove('open');
+  document.getElementById('prep-overlay').classList.remove('open');
+}
 
 async function loadWeather() {
   try {
@@ -1132,6 +1314,99 @@ def api_capture():
         return jsonify({'ok': bool(result), 'title': title, 'notes': notes})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/api/meeting-prep', methods=['POST'])
+def api_meeting_prep():
+    try:
+        import anthropic, re as _re
+        body = request.json or {}
+        meeting_title = body.get('title', '')
+        attendees = body.get('attendees', [])  # list of display names
+        meeting_time = body.get('time', '')
+
+        # --- Pull relevant Google Tasks ---
+        relevant_tasks = []
+        if TASKS_AVAILABLE:
+            from google_tasks import get_task_lists, get_tasks_hierarchical
+            task_lists = get_task_lists()
+            keywords = set()
+            # Keywords from meeting title
+            for w in _re.split(r'[\s\-/]+', meeting_title.lower()):
+                if len(w) > 3:
+                    keywords.add(w)
+            # Keywords from attendee first names
+            for a in attendees:
+                first = a.split()[0].lower() if a else ''
+                if first:
+                    keywords.add(first)
+
+            for tl in task_lists:
+                for cat in get_tasks_hierarchical(tl['id']):
+                    title_lower = cat['name'].lower()
+                    notes_lower = ''
+                    # Check parent task
+                    if any(k in title_lower or k in notes_lower for k in keywords):
+                        relevant_tasks.append(cat['name'])
+                    # Check subtasks
+                    for t in cat.get('tasks', []):
+                        t_lower = t.get('title', '').lower()
+                        if any(k in t_lower for k in keywords):
+                            relevant_tasks.append(t.get('title', ''))
+
+        relevant_tasks = relevant_tasks[:12]
+
+        # --- Pull recent decisions from shared_memory ---
+        past_context = []
+        if MEMORY_AVAILABLE:
+            mem = load_memory()
+            keywords_list = list(keywords) if 'keywords' in dir() else []
+            for m in reversed(mem.get('meetings', [])[-30:]):
+                m_text = (m.get('title', '') + ' ' + str(m.get('signals', {}))).lower()
+                if any(k in m_text for k in keywords_list):
+                    for d in m.get('signals', {}).get('decisions', []):
+                        past_context.append(f"Decision ({m.get('date','')[:10]}): {d}")
+                    for a in m.get('signals', {}).get('actions_for_me', []):
+                        past_context.append(f"Action from meeting: {a}")
+            past_context = past_context[:8]
+
+        # --- Build Claude prompt ---
+        context_parts = []
+        if relevant_tasks:
+            context_parts.append("Open tasks related to this meeting:\n" + "\n".join(f"- {t}" for t in relevant_tasks))
+        if past_context:
+            context_parts.append("Past decisions/actions:\n" + "\n".join(f"- {c}" for c in past_context))
+
+        context_str = "\n\n".join(context_parts) if context_parts else "No prior context found yet."
+        attendees_str = ", ".join(attendees) if attendees else "unknown attendees"
+
+        prompt = (
+            f"You are helping Lucas Willett (Director, Customer Support at Visiting Media) prepare for a meeting.\n\n"
+            f"Meeting: {meeting_title}\n"
+            f"Attendees: {attendees_str}\n"
+            f"Time: {meeting_time}\n\n"
+            f"Context from support memory:\n{context_str}\n\n"
+            f"Write a concise meeting prep brief (4-8 sentences). Include:\n"
+            f"- What's open or unresolved that's relevant to this meeting\n"
+            f"- What Lucas should get from or communicate to the attendees\n"
+            f"- Any decisions or commitments to follow up on\n"
+            f"- One clear 'walk in knowing' statement\n\n"
+            f"If there's no specific context, give general prep advice for this meeting type.\n"
+            f"Be direct. No headers. No bullet points. Just a flowing prep paragraph."
+        )
+
+        client = anthropic.Anthropic()
+        resp = client.messages.create(
+            model='claude-haiku-4-5-20251001',
+            max_tokens=400,
+            messages=[{'role': 'user', 'content': prompt}]
+        )
+        brief = resp.content[0].text.strip()
+
+        return jsonify({'brief': brief, 'tasks': relevant_tasks})
+
+    except Exception as e:
+        return jsonify({'error': str(e), 'brief': '', 'tasks': []})
 
 
 _weather_cache = {'data': None, 'ts': 0}
